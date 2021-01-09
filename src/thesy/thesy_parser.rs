@@ -3,23 +3,23 @@ pub mod parser {
     use std::io::Read;
     use std::str::FromStr;
 
-    use egg::{Pattern, RecExpr, Rewrite, SymbolLang, Var, Condition, ConditionalApplier, Applier, Searcher, Language, PatternAst, ENodeOrVar, Id};
+    use egg::{Pattern, RecExpr, Rewrite, SymbolLang, Var, Applier, Searcher, Language, PatternAst, ENodeOrVar, Id};
     use itertools::{Itertools};
     use symbolic_expressions::Sexp;
 
     use crate::eggstentions::appliers::DiffApplier;
     use crate::lang::{DataType, Function};
     use std::collections::{HashMap};
-    use crate::eggstentions::conditions::{NonPatternCondition, AndCondition};
     use multimap::MultiMap;
-    use crate::eggstentions::multisearcher::multisearcher::{MultiDiffSearcher, EitherSearcher, MultiEqSearcher};
+    use crate::eggstentions::searchers::multisearcher::{MultiDiffSearcher, EitherSearcher, MultiEqSearcher, FilteringSearcher, MatchFilter, aggregate_conditions, ToDyn, PointerSearcher};
     use std::fmt::Debug;
     use crate::eggstentions::pretty_string::PrettyString;
     use crate::eggstentions::expression_ops::{IntoTree, Tree};
     use crate::thesy::{case_split};
     use crate::tools::tools::combinations;
+    use std::rc::Rc;
 
-    #[derive(Default, Clone, Debug)]
+    #[derive(Default, Clone)]
     pub struct Definitions {
         /// All datatype definitions
         pub datatypes: Vec<DataType>,
@@ -29,6 +29,8 @@ pub mod parser {
         pub rws: Vec<Rewrite<SymbolLang, ()>>,
         /// Terms to prove, given as not forall, (vars - types, precondition, ex1, ex2)
         pub conjectures: Vec<(HashMap<RecExpr<SymbolLang>, RecExpr<SymbolLang>>, Option<RecExpr<SymbolLang>>, RecExpr<SymbolLang>, RecExpr<SymbolLang>)>,
+        /// Logic of when to apply case split
+        pub case_splitters: Vec<(Rc<dyn Searcher<SymbolLang, ()>>, Var, Vec<Pattern<SymbolLang>>)>,
     }
 
     impl Definitions {
@@ -48,6 +50,7 @@ pub mod parser {
                             rw1.name() != rw.name()
                         })
                 }).collect_vec());
+            self.case_splitters.extend(std::mem::take(&mut other.case_splitters));
         }
     }
 
@@ -58,33 +61,35 @@ pub mod parser {
         parse(&contents.split("\n").map(|s| s.to_string()).collect_vec()[..])
     }
 
-    fn collected_precon_conds_to_rw(name: String, precond: Option<Pattern<SymbolLang>>, searcher: impl Searcher<SymbolLang, ()> + Debug + 'static, applier: impl Applier<SymbolLang, ()> + 'static, dif_app: bool, conditions: Vec<Box<dyn Condition<SymbolLang, ()>>>) -> Result<Rewrite<SymbolLang, ()>, String> {
+    fn collected_precon_conds_to_rw(name: String, precond: Option<Pattern<SymbolLang>>, searcher: impl Searcher<SymbolLang, ()> + Debug + 'static, applier: impl Applier<SymbolLang, ()> + 'static, dif_app: bool, conditions: Vec<MatchFilter<SymbolLang, ()>>) -> Result<Rewrite<SymbolLang, ()>, String> {
         if precond.is_some() {
             // Order important as root of match is root of first pattern.
             let dif_searcher = MultiDiffSearcher::new(vec![
                 EitherSearcher::left(searcher),
                 EitherSearcher::right(MultiEqSearcher::new(vec![precond.unwrap(), Pattern::from_str("true").unwrap()]))
             ]);
-            collected_conds_to_rw(name, dif_searcher, applier, dif_app, conditions)
+            collected_conds_to_rw(name, dif_searcher.into_rc_dyn(), applier, dif_app, conditions)
         } else {
-            collected_conds_to_rw(name, searcher, applier, dif_app, conditions)
+            let dyn_s: Rc<dyn Searcher<SymbolLang, ()>> = Rc::new(searcher);
+            collected_conds_to_rw(name, dyn_s, applier, dif_app, conditions)
         }
     }
 
-    fn collected_conds_to_rw(name: String, searcher: impl Searcher<SymbolLang, ()> + Debug + 'static, applier: impl Applier<SymbolLang, ()> + 'static, dif_app: bool, conditions: Vec<Box<dyn Condition<SymbolLang, ()>>>) -> Result<Rewrite<SymbolLang, ()>, String> {
+    fn collected_conds_to_rw(name: String, searcher: Rc<dyn Searcher<SymbolLang, ()>>, applier: impl Applier<SymbolLang, ()> + 'static, dif_app: bool, conditions: Vec<MatchFilter<SymbolLang, ()>>) -> Result<Rewrite<SymbolLang, ()>, String> {
         if !conditions.is_empty() {
-            collected_to_rw(name, searcher, ConditionalApplier { applier, condition: AndCondition::new(conditions) }, dif_app)
+            collected_to_rw(name, FilteringSearcher::new(searcher, aggregate_conditions(conditions)).into_rc_dyn(), applier, dif_app)
         } else {
             collected_to_rw(name, searcher, applier, dif_app)
         }
     }
 
-    fn collected_to_rw(name: String, searcher: impl Searcher<SymbolLang, ()> + Debug + 'static, applier: impl Applier<SymbolLang, ()> + 'static, dif_app: bool) -> Result<Rewrite<SymbolLang, ()>, String> {
+    fn collected_to_rw(name: String, searcher: Rc<dyn Searcher<SymbolLang, ()>>, applier: impl Applier<SymbolLang, ()> + 'static, dif_app: bool) -> Result<Rewrite<SymbolLang, ()>, String> {
+        let psearcher = PointerSearcher::new(searcher);
         if dif_app {
             let diff_applier = DiffApplier::new(applier);
-            return Rewrite::new(name, searcher, diff_applier);
+            return Rewrite::new(name, psearcher, diff_applier);
         }
-        Rewrite::new(name, searcher, applier)
+        Rewrite::new(name, psearcher, applier)
     }
 
     pub fn parse(lines: &[String]) -> Definitions {
@@ -162,6 +167,7 @@ pub mod parser {
                     let searcher1 = searcher.clone();
                     let applier1 = applier.clone();
                     let rw1 = collected_precon_conds_to_rw(name.clone(), precondition.clone(), searcher, applier, false, conditions);
+                    // TODO: Shouldnt need to create empty filter
                     let rw2 = collected_precon_conds_to_rw(name + "-rev", precondition, applier1, searcher1, false, vec![]);
                     let rws = vec![rw1, rw2].into_iter().flatten().collect_vec();
                     res.rws.extend(rws);
@@ -178,8 +184,8 @@ pub mod parser {
                         }).collect();
                     let (mut precondition, mut equality) = {
                         let mut expr = forall_list[2].take_list().unwrap();
+                        info!("goal: {}", expr.iter().map(|x| x.to_string()).intersperse(" ".parse().unwrap()).collect::<String>());
                         if expr[0].string().unwrap() == "=>" {
-                            println!("expr: {}", expr.iter().map(|x| x.to_string()).intersperse(" ".parse().unwrap()).collect::<String>());
                             let equality = expr.remove(2).take_list().unwrap();
                             let precond = expr.remove(1);
                             (Some(precond), equality)
@@ -215,9 +221,10 @@ pub mod parser {
             ).collect_vec()
         }
 
+        // Foreach function find if and when case split should be applied
         for f in &res.functions {
             let opt_pats = function_patterns.get_vec(f);
-            let rws = opt_pats.map(|pats| {
+            let case_splitters = opt_pats.map(|pats| {
                 let relevant_params = f.params.iter().enumerate().filter_map(|(i, t)| {
                     let param_datatype = res.datatypes.iter().find(|d|
                         d.name == t.into_tree().root().op.to_string());
@@ -278,7 +285,8 @@ pub mod parser {
                             } else {
                                 v
                             }).collect_vec();
-                    let mut res: Vec<Rewrite<SymbolLang, ()>> = vec![];
+                    // let mut res: Vec<Rewrite<SymbolLang, ()>> = vec![];
+                    let mut res: Vec<(Rc<dyn Searcher<SymbolLang, ()>>, Var, Vec<Pattern<SymbolLang>>)> = vec![];
                     for combs in combinations(patterns_and_vars.iter().cloned().map(|x| x.into_iter())) {
                         let mut nodes = vec![];
                         let children = combs.into_iter().map(|exp| {
@@ -294,39 +302,42 @@ pub mod parser {
                         }).collect_vec();
                         nodes.push(ENodeOrVar::ENode(SymbolLang::new(&f.name, children)));
                         let searcher = Pattern::from(RecExpr::from(nodes));
+                        println!("Searcher: {}", searcher.pretty_string());
                         let root_var: &ENodeOrVar<SymbolLang> = searcher.ast.into_tree().children()[index].root();
                         let root_v_opt = if let &ENodeOrVar::Var(v) = root_var {
                             Some(v)
                         } else {
                             None
                         };
-                        // TODO: Add datatype filter patterns as condition
                         let mut cond_texts = vec![];
-                        let conds: Vec<Box<dyn Condition<SymbolLang, ()>>> = datatype.constructors.iter().map(|c| c.apply_params(
+                        let searcher_conditions = datatype.constructors.iter().map(|c| c.apply_params(
                             (0..c.params.len()).map(|i| RecExpr::from_str(&*("?param_".to_owned() + &*i.to_string())).unwrap()).collect_vec()
                         )).map(|exp| {
                             cond_texts.push(format!("Cond(var: {}, pat: {})", root_v_opt.as_ref().unwrap().to_string(), exp.pretty(1000)));
-                            let cond: Box<dyn Condition<SymbolLang, ()>> = Box::new(NonPatternCondition::new(Pattern::from_str(&*exp.pretty(1000)).unwrap(), root_v_opt.unwrap()));
-                            cond
+                            FilteringSearcher::create_non_pattern_filterer(Pattern::from_str(&*exp.pretty(1000)).unwrap().into_rc_dyn(), root_v_opt.unwrap())
                         }).collect_vec();
-                        let applier_text = format!("({} {} {})", case_split::SPLITTER, root_var.display_op(), get_splitters(datatype, root_var).join(" "));
-                        let applier: Pattern<SymbolLang> = Pattern::from_str(&*applier_text).unwrap();
-                        let rule_name = format!("{}_split_{}_{}", f.name, index, res.len());
-                        println!("{} => {} if {}", searcher.pretty_string(), applier_text, cond_texts.join(" "));
-                        let cond = AndCondition::new(conds);
-                        res.push(Rewrite::new(rule_name, searcher, DiffApplier::new(ConditionalApplier { applier, condition: cond })).unwrap());
-                        // rewrite!(rule_name; searcher => applier if cond)
+                        let dyn_searcher: Rc<dyn Searcher<SymbolLang, ()>> = Rc::new(searcher.clone());
+                        let conditonal_searcher = searcher_conditions.into_iter().fold(dyn_searcher, |pattern, y|{
+                            Rc::new(FilteringSearcher::new(pattern, y))
+                        });
+
+                        // For now pass the searcher, a condition and expressions for root and
+                        // splits. Should be (Searcher, root_var, children_expr, conditions)
+                        // res.push(Rewrite::new(rule_name, searcher, DiffApplier::new(ConditionalApplier { applier, condition: cond })).unwrap());
+                        res.push((conditonal_searcher.clone(),
+                                  root_v_opt.unwrap(),
+                                  get_splitters(datatype, root_var).iter().map(|x| Pattern::from_str(x).unwrap()).collect_vec()));
                     }
                     res
                 }).collect_vec()
             }).unwrap_or(vec![]);
-            res.rws.extend_from_slice(&rws);
+            res.case_splitters.extend(case_splitters);
         }
 
         res
     }
 
-    fn collect_rule(l: &mut Vec<Sexp>) -> (String, Option<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Vec<Box<dyn Condition<SymbolLang, ()>>>) {
+    fn collect_rule(l: &mut Vec<Sexp>) -> (String, Option<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Vec<MatchFilter<SymbolLang, ()>>) {
         let name = l[1].take_string().unwrap();
 
         let mut conditions_inx = 4;
@@ -349,8 +360,7 @@ pub mod parser {
             let v_cond = s.list().unwrap();
             let var = Var::from_str(v_cond[0].string().unwrap()).unwrap();
             let cond: Pattern<SymbolLang> = Pattern::from_str(&*v_cond[1].to_string()).unwrap();
-            let res: Box<dyn Condition<SymbolLang, ()>> = Box::new(NonPatternCondition::new(cond, var));
-            res
+            FilteringSearcher::create_non_pattern_filterer(cond.into_rc_dyn(), var)
         }).collect_vec();
         println!("{} => {}", searcher.pretty_string(), applier.pretty_string());
         (name, precondition, searcher, applier, conditions)
