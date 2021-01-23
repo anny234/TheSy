@@ -7,7 +7,7 @@ pub mod parser {
     use itertools::{Itertools};
     use symbolic_expressions::Sexp;
 
-    use crate::eggstentions::appliers::DiffApplier;
+    use crate::eggstentions::appliers::{DiffApplier, CompApplier};
     use crate::lang::{DataType, Function};
     use std::collections::{HashMap};
     use multimap::MultiMap;
@@ -148,8 +148,16 @@ pub mod parser {
                     if !searcher.ast.into_tree().root().is_leaf() {
                         name_pats.push((format!("{}", searcher.ast.into_tree().root().display_op()), searcher.ast.clone()));
                     }
-                    let rw = collected_precon_conds_to_rw(name, precondition, searcher, applier, true, conditions);
-                    res.rws.push(rw.unwrap());
+                    if applier.ast.into_tree().root().display_op().to_string() == "&" {
+                        let patterns = applier.ast.into_tree().children().iter().map(|p| Pattern::from(p.to_clean_exp())).collect_vec();
+                        let applier1 = CompApplier::new(patterns);
+                        let rw = collected_precon_conds_to_rw(name, precondition, searcher, applier1, false, conditions);
+                        res.rws.push(rw.unwrap());
+                    }
+                    else {
+                        let rw = collected_precon_conds_to_rw(name, precondition, searcher, applier, true, conditions);
+                        res.rws.push(rw.unwrap());
+                    }
                 }
                 "<=>" => {
                     let (name, precondition, mut searcher, mut applier, conditions) = collect_rule(&mut l);

@@ -1,6 +1,42 @@
 use egg::{Analysis, Applier, EGraph, Id, Language, Pattern, SearchMatches, Subst, SymbolLang, Var};
 use itertools::Itertools;
 
+pub struct CompApplier {
+    appliers: Vec<Pattern<SymbolLang>>
+}
+
+impl CompApplier {
+    pub fn new(appliers: Vec<Pattern<SymbolLang>>) -> CompApplier {
+        CompApplier{appliers}
+    }
+}
+
+impl Applier<SymbolLang, ()> for CompApplier {
+    fn apply_matches(&self, egraph: &mut EGraph<SymbolLang, ()>, matches: &[SearchMatches]) -> Vec<Id> {
+        let mut added = vec![];
+        for mat in matches {
+            for subst in &mat.substs {
+                let ids = self.appliers.iter().flat_map(|a| a.apply_one(egraph, mat.eclass, subst)).collect_vec();
+                let eclass = ids[0];
+                let added_ids = ids.into_iter().filter_map(|i| {
+                    let (to, did_something) = egraph.union(i, eclass);
+                    if did_something {
+                        Some(to)
+                    } else {
+                        None
+                    }
+                });
+                added.extend(added_ids)
+            }
+        };
+        added
+    }
+
+    fn apply_one(&self, egraph: &mut EGraph<SymbolLang, ()>, eclass: Id, subst: &Subst) -> Vec<Id> {
+        unimplemented!()
+    }
+}
+
 pub struct DiffApplier<T: Applier<SymbolLang, ()>> {
     applier: T
 }
