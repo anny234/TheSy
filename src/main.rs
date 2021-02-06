@@ -142,9 +142,12 @@ impl TheSyConfig {
         let results = thesy.run(&mut rules, Some(case_split), max_depth.unwrap_or(2));
         let new_rules_text = results.iter()
             .map(|(precond, searcher, applier, rw)|
-                if precond.is_some() {
-                    let precond = precond.as_ref().unwrap();
-                    format!("(=> \"{} |> {} => {}\" (=> {} (= {} {})))", precond.pretty_string(), searcher.pretty(1000), applier.pretty(1000), precond.pretty_string(), searcher.pretty(1000), applier.pretty(1000))
+                if precond.is_empty() {
+                    let precond_text = precond.iter().map(|p| {
+                        p.pretty_string()
+                    }).join(" => ");
+                    // This print is not exactly right...
+                    format!("(=> \"{} |> {} => {}\" (=> {} (= {} {})))", precond_text, searcher.pretty(1000), applier.pretty(1000), precond_text, searcher.pretty(1000), applier.pretty(1000))
                 } else {
                     format!("(=> \"{} => {}\" {} {})", searcher.pretty(1000), applier.pretty(1000), searcher.pretty(1000), applier.pretty(1000))
                 })
@@ -229,7 +232,7 @@ fn main() {
     if args.check_equiv {
         for (vars, precond, ex1, ex2) in &config.definitions.conjectures {
             if TheSy::check_equality(&rws, precond, ex1, ex2) {
-                println!("proved: {}{} = {}", precond.as_ref().map(|x| format!("{} => ", x.pretty(500))).unwrap_or("".to_string()), ex1.pretty(500), ex2.pretty(500))
+                println!("proved: {}{} = {}", precond.iter().map(|x| format!("{} => ", x.pretty(500))).join(" => "), ex1.pretty(500), ex2.pretty(500))
             }
         }
         exit(0)

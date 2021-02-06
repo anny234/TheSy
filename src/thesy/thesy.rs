@@ -50,7 +50,7 @@ pub struct TheSy {
     iter_limit: usize,
     /// Lemmas given by user to prove. Continue exploration until all lemmas are provable then stop.
     /// If empty then TheSy will fully explore the space. (precondition, ex1, ex2)
-    goals: Option<Vec<Vec<(Option<RecExpr<SymbolLang>>, RecExpr<SymbolLang>, RecExpr<SymbolLang>)>>>,
+    goals: Option<Vec<Vec<(Vec<RecExpr<SymbolLang>>, RecExpr<SymbolLang>, RecExpr<SymbolLang>)>>>,
     /// If stats enable contains object collecting runtime data on thesy otherwise None.
     pub stats: Stats,
     /// Assumptions to colors
@@ -104,7 +104,7 @@ impl TheSy {
         Self::new_with_ph(vec![datatype.clone()], HashMap::from_iter(iter::once((datatype, examples))), dict, 2, None)
     }
 
-    pub fn new_with_ph(datatypes: Vec<DataType>, examples: HashMap<DataType, Examples>, dict: Vec<Function>, ph_count: usize, lemmas: Option<Vec<(HashMap<RecExpr<SymbolLang>, RecExpr<SymbolLang>>, Option<RecExpr<SymbolLang>>, RecExpr<SymbolLang>, RecExpr<SymbolLang>)>>) -> TheSy {
+    pub fn new_with_ph(datatypes: Vec<DataType>, examples: HashMap<DataType, Examples>, dict: Vec<Function>, ph_count: usize, lemmas: Option<Vec<(HashMap<RecExpr<SymbolLang>, RecExpr<SymbolLang>>, Vec<RecExpr<SymbolLang>>, RecExpr<SymbolLang>, RecExpr<SymbolLang>)>>) -> TheSy {
         debug_assert!(examples.iter().all(|(d, e)| &e.datatype == d));
         let datatype_to_prover: HashMap<DataType, Prover> = datatypes.iter()
             .map(|d| (d.clone(), Prover::new(d.clone()))).collect();
@@ -132,14 +132,14 @@ impl TheSy {
                 let replacments: HashMap<Symbol, Symbol> = types_to_vars.values().flat_map(|v| {
                     v.iter().map(|(k, f)| (*k, Symbol::from(&f.name)))
                 }).collect();
-                let precond_replaced = precond.map(|p| Self::replace_ops(&p, &replacments));
+                let precond_replaced = precond.iter().map(|p| Self::replace_ops(&p, &replacments));
                 let ex1_replaced = Self::replace_ops(&ex1, &replacments);
                 let ex2_replaced = Self::replace_ops(&ex2, &replacments);
                 types_to_vars.keys().filter(|key| datatypes.iter()
                     .any(|d| d.as_exp().into_tree() == key.into_tree()))
                     .flat_map(|typ| {
                         types_to_vars[typ].values().zip(iter::once(typ).cycle()).map(|(ph, typ)| {
-                            (precond_replaced.clone().map(|p| Self::replace_op(&p, Symbol::from(&ph.name), Symbol::from(&Self::get_ph(typ, 0).name))),
+                            (precond_replaced.clone().map(|p| Self::replace_op(&p, Symbol::from(&ph.name), Symbol::from(&Self::get_ph(typ, 0).name))).collect_vec(),
                              Self::replace_op(&ex1_replaced, Symbol::from(&ph.name), Symbol::from(&Self::get_ph(typ, 0).name)),
                              Self::replace_op(&ex2_replaced, Symbol::from(&ph.name), Symbol::from(&Self::get_ph(typ, 0).name)))
                         })
@@ -432,14 +432,14 @@ impl TheSy {
         res.into_iter().rev().collect_vec()
     }
 
-    pub fn check_equality(rules: &[Rewrite<SymbolLang, ()>], precond: &Option<RecExpr<SymbolLang>>, ex1: &RecExpr<SymbolLang>, ex2: &RecExpr<SymbolLang>) -> bool {
-        let mut egraph = Prover::create_graph(precond.as_ref(), &ex1, &ex2);
+    pub fn check_equality(rules: &[Rewrite<SymbolLang, ()>], precond: &Vec<RecExpr<SymbolLang>>, ex1: &RecExpr<SymbolLang>, ex2: &RecExpr<SymbolLang>) -> bool {
+        let mut egraph = Prover::create_graph(&precond.iter().collect_vec(), &ex1, &ex2);
         let runner = Runner::default().with_iter_limit(8).with_time_limit(Duration::from_secs(60)).with_node_limit(10000).with_egraph(egraph).run(rules);
         !runner.egraph.equivs(ex1, ex2).is_empty()
     }
 
     fn check_goals(&mut self, case_splitter: &mut Option<&mut CaseSplit>, rules: &mut Vec<Rewrite<SymbolLang, ()>>)
-                   -> Option<Vec<(Option<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Rewrite<SymbolLang, ()>)>> {
+                   -> Option<Vec<(Vec<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Rewrite<SymbolLang, ()>)>> {
         if self.goals.is_none() {
             return None;
         }
@@ -452,7 +452,7 @@ impl TheSy {
                     let start = if cfg!(feature = "stats") {
                         Some(SystemTime::now())
                     } else { None };
-                    res = p.prove_all_split_d(case_splitter, rules, Option::from(precond), ex1, ex2, 3);
+                    res = p.prove_all_split_d(case_splitter, rules, &precond.iter().collect_vec(), ex1, ex2, 3);
                     index = i;
                     if res.is_some() {
                         if cfg!(feature = "stats") {
@@ -473,7 +473,7 @@ impl TheSy {
         res
     }
 
-    pub fn run(&mut self, rules: &mut Vec<Rewrite<SymbolLang, ()>>, mut case_spliter: Option<CaseSplit>, max_depth: usize) -> Vec<(Option<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Rewrite<SymbolLang, ()>)> {
+    pub fn run(&mut self, rules: &mut Vec<Rewrite<SymbolLang, ()>>, mut case_spliter: Option<CaseSplit>, max_depth: usize) -> Vec<(Vec<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Rewrite<SymbolLang, ()>)> {
         // TODO: dont allow rules like (take ?x ?y) => (take ?x (append ?y ?y))
         info!("Running TheSy on datatypes: {} dict: {}", self.datatypes.keys().map(|x| &x.name).join(" "), self.dict.iter().map(|x| &x.name).join(" "));
         self.stats.init_run();
@@ -521,7 +521,7 @@ impl TheSy {
                         ex2 = new_rules.as_ref().unwrap()[0].2.pretty_string().parse().unwrap();
                         info!("generalized to {} -- {}", ex1.pretty(500), ex2.pretty(500));
                     }
-                    if Self::check_equality(&rules[..], &None, &ex1, &ex2) {
+                    if Self::check_equality(&rules[..], &vec!(), &ex1, &ex2) {
                         info!("bad conjecture {} = {}", &ex1.pretty(500), &ex2.pretty(500));
                         self.stats.update_filtered_conjecture(&ex1, &ex2);
                         continue 'outer;
@@ -555,7 +555,7 @@ impl TheSy {
         found_rules
     }
 
-    fn prove_case_split_rules(&mut self, case_splitter: &mut CaseSplit, rules: &mut Vec<Rewrite<SymbolLang, ()>>, found_rules: &mut Vec<(Option<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Rewrite<SymbolLang, ()>)>, new_rules_index: usize) -> bool {
+    fn prove_case_split_rules(&mut self, case_splitter: &mut CaseSplit, rules: &mut Vec<Rewrite<SymbolLang, ()>>, found_rules: &mut Vec<(Vec<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Rewrite<SymbolLang, ()>)>, new_rules_index: usize) -> bool {
         let measure_splits = if cfg!(feature = "stats") {
             let n = case_split::split_patterns.iter().map(|p|
                 p.search(&self.egraph)
@@ -585,7 +585,7 @@ impl TheSy {
                 other_ex1 == &ex1 && &ex2 == other_ex2) {
                 continue;
             }
-            if Self::check_equality(&rules[..], &None, &ex1, &ex2) {
+            if Self::check_equality(&rules[..], &vec!(), &ex1, &ex2) {
                 self.stats.update_filtered_conjecture(&ex1, &ex2);
                 continue;
             }
@@ -625,7 +625,7 @@ impl TheSy {
     }
 
     /// Attempt to prove all lemmas with retry. Return true if finished all goals.
-    fn prove_goals(&mut self, case_splitter: &mut Option<&mut CaseSplit>, rules: &mut Vec<Rewrite<SymbolLang, ()>>, found_rules: &mut Vec<(Option<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Rewrite<SymbolLang, ()>)>, new_rules_index: usize) -> bool {
+    fn prove_goals(&mut self, case_splitter: &mut Option<&mut CaseSplit>, rules: &mut Vec<Rewrite<SymbolLang, ()>>, found_rules: &mut Vec<(Vec<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Rewrite<SymbolLang, ()>)>, new_rules_index: usize) -> bool {
         loop {
             let lemma = self.check_goals(case_splitter, rules);
             if lemma.is_none() {
@@ -1083,7 +1083,7 @@ mod test {
         let mut thesy = TheSy::from(&config);
         thesy.run(&mut config.definitions.rws, None, 2);
         assert_eq!(config.definitions.datatypes.len(), 1);
-        let res = TheSy::check_equality(&config.definitions.rws, &None, &"(append x (append y z))".parse().unwrap(), &"(append (append x y) z)".parse().unwrap());
+        let res = TheSy::check_equality(&config.definitions.rws, &vec!(), &"(append x (append y z))".parse().unwrap(), &"(append (append x y) z)".parse().unwrap());
         assert!(res);
     }
 }

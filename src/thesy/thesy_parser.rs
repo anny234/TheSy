@@ -28,7 +28,7 @@ pub mod parser {
         /// Rewrites defined by (assert forall)
         pub rws: Vec<Rewrite<SymbolLang, ()>>,
         /// Terms to prove, given as not forall, (vars - types, precondition, ex1, ex2)
-        pub conjectures: Vec<(HashMap<RecExpr<SymbolLang>, RecExpr<SymbolLang>>, Option<RecExpr<SymbolLang>>, RecExpr<SymbolLang>, RecExpr<SymbolLang>)>,
+        pub conjectures: Vec<(HashMap<RecExpr<SymbolLang>, RecExpr<SymbolLang>>, Vec<RecExpr<SymbolLang>>, RecExpr<SymbolLang>, RecExpr<SymbolLang>)>,
         /// Logic of when to apply case split
         pub case_splitters: Vec<(Rc<dyn Searcher<SymbolLang, ()>>, Var, Vec<Pattern<SymbolLang>>)>,
     }
@@ -185,7 +185,7 @@ pub mod parser {
                 "prove" => {
                     let mut forall_list = l[1].take_list().unwrap();
                     assert_eq!(forall_list[0].take_string().unwrap(), "forall");
-                    let mut var_map = forall_list[1].take_list().unwrap().iter_mut()
+                    let var_map = forall_list[1].take_list().unwrap().iter_mut()
                         .map(|s| {
                             let s_list = s.take_list().unwrap();
                             (sexp_to_recexpr(&s_list[0]), sexp_to_recexpr(&s_list[1]))
@@ -193,18 +193,12 @@ pub mod parser {
                     let (mut precondition, mut equality) = {
                         let mut expr = forall_list[2].take_list().unwrap();
                         info!("goal: {}", expr.iter().map(|x| x.to_string()).intersperse(" ".parse().unwrap()).collect::<String>());
-                        if expr[0].string().unwrap() == "=>" {
-                            let equality = expr.remove(2).take_list().unwrap();
-                            let precond = expr.remove(1);
-                            (Some(precond), equality)
-                        } else {
-                            (None, expr)
-                        }
+                        collect_goal_preconditions(vec!(), expr)
                     };
                     if !(equality[0].string().unwrap() == "=" || equality[0].string().unwrap() == "<=>") {
                         equality = vec![Sexp::String("=".to_string()), Sexp::String("true".to_string()), Sexp::List(equality)];
                     }
-                    res.conjectures.push((var_map, precondition.map(|x| sexp_to_recexpr(&x)), sexp_to_recexpr(&equality[1]), sexp_to_recexpr(&equality[2])));
+                    res.conjectures.push((var_map, precondition.iter().map(|x| sexp_to_recexpr(&x)).collect_vec(), sexp_to_recexpr(&equality[1]), sexp_to_recexpr(&equality[2])));
                 }
                 _ => {
                     println!("Error parsing smtlib2 line, found {} op which is not supported", l[0].to_string())
@@ -343,6 +337,17 @@ pub mod parser {
         }
 
         res
+    }
+
+    fn collect_goal_preconditions(mut preconditions: Vec<Sexp>, mut expr: Vec<Sexp>) -> (Vec<Sexp>, Vec<Sexp>) {
+        if expr[0].string().unwrap() == "=>" {
+            let equality = expr.remove(2).take_list().unwrap();
+            let precond = expr.remove(1);
+            preconditions.push(precond);
+            collect_goal_preconditions(preconditions, equality)
+        } else {
+            (preconditions, expr)
+        }
     }
 
     fn collect_rule(l: &mut Vec<Sexp>) -> (String, Option<Pattern<SymbolLang>>, Pattern<SymbolLang>, Pattern<SymbolLang>, Vec<MatchFilter<SymbolLang, ()>>) {

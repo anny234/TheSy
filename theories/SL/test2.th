@@ -1,0 +1,11 @@
+(datatype Nat () ((succ Nat Nat) (zero Nat)))
+
+(declare-fun A (Nat) bool)
+(declare-fun B (Nat) bool)
+
+(=|> ab_to_a (=> (= (A ?i) true) (= (= (B zero) true) (& (A (succ ?i)) true))))
+(=|> a_to_ab1 (A (succ ?i)) (B zero))
+(=|> a_to_ab2 (A (succ ?i)) (A ?i))
+
+
+(prove (forall ((i Nat)) (=> (A zero) (=> (B zero) (A i)))))
